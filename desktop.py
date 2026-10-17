@@ -78,7 +78,11 @@ if sys.platform == "win32":
                 on_stop()
 
 elif sys.platform == "darwin":
+    import os
+    import re
+    import shutil
     import subprocess
+    from pathlib import Path
 
     def _osascript(script: str) -> str:
         return subprocess.run(["osascript", "-e", script], capture_output=True, text=True).stdout.strip()
@@ -87,13 +91,57 @@ elif sys.platform == "darwin":
         return _osascript('tell application "System Events" to get name of first application process '
                           "whose frontmost is true")
 
+    def _tmux(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["tmux", *args], capture_output=True, text=True)
+
+    def _claude_pane() -> str | None:
+        """Панель tmux с Claude Code. VEGA_TMUX задаёт её явно, например «main:0.1»."""
+        if os.environ.get("VEGA_TMUX"):
+            return os.environ["VEGA_TMUX"]
+        if not shutil.which("tmux"):
+            return None
+        panes = _tmux("list-panes", "-a", "-F", "#{pane_id} #{pane_current_command}").stdout
+        for line in panes.splitlines():
+            pane, _, command = line.partition(" ")
+            # нативный claude может называться по версии: ~/.local/share/claude/versions/2.1.302
+            if command == "claude" or re.fullmatch(r"\d+\.\d+\.\d+", command):
+                return pane
+        return None
+
+    def _bind_tmux_stop():
+        # Мониторинг ввода без админа не выдать, поэтому «замолчи» — на клавише tmux: префикс, затем S
+        hook = Path(__file__).with_name("speak_hook.py")
+        _tmux("bind-key", "S", "run-shell", "-b", f"'{sys.executable}' '{hook}' --stop < /dev/null")
+
+    _use_tmux = False
+
     def pick_target():
+        global STOP_HOTKEY, _use_tmux
+        # tmux send-keys не требует «Универсального доступа»
+        pane = _claude_pane()
+        if pane:
+            _bind_tmux_stop()
+            _use_tmux = True
+            STOP_HOTKEY = "Ctrl+B, затем S"
+            print(f"Целевая панель tmux: {pane}")
+            return ("tmux", pane)
         _countdown()
         app = _frontmost_app()
         print(f"\rЦелевое приложение: «{app}»          ")
-        return app
+        return ("app", app)
 
-    def deliver(app: str, text: str) -> bool:
+    def deliver(target: tuple[str, str], text: str) -> bool:
+        kind, name = target
+        if kind == "tmux":
+            if _tmux("send-keys", "-t", name, "-l", text).returncode != 0:
+                print(f"  [панель tmux {name} недоступна — не отправлено]")
+                return False
+            time.sleep(0.1)  # иначе Enter приходит вместе с текстом, как вставка, и не отправляет
+            _tmux("send-keys", "-t", name, "Enter")
+            return True
+        return _deliver_app(name, text)
+
+    def _deliver_app(app: str, text: str) -> bool:
         # Русский текст через keystroke печатается криво, поэтому вставка из буфера обмена.
         # Нужно разрешение: Настройки → Конфиденциальность → Универсальный доступ → терминал.
         previous = subprocess.run(["pbpaste"], capture_output=True).stdout
@@ -115,6 +163,8 @@ elif sys.platform == "darwin":
 
     def stop_hotkey_loop(on_stop):
         # Нужно разрешение: Настройки → Конфиденциальность → Мониторинг ввода → терминал.
+        if _use_tmux:
+            return  # «замолчи» висит на клавише tmux, разрешение не нужно
         try:
             from pynput import keyboard
         except ImportError:

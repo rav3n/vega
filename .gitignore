@@ -2,3 +2,4 @@
 voices/
 __pycache__/
 .mute
+.tools/

@@ -19,7 +19,8 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 
-from desktop import STOP_HOTKEY, deliver, pick_target, stop_hotkey_loop
+import desktop
+from desktop import deliver, pick_target, stop_hotkey_loop
 from speak_hook import PID_FILE, stop_playing
 
 RATE = 16000
@@ -99,7 +100,7 @@ def main():
     target = pick_target()
     threading.Thread(target=stop_hotkey_loop, args=(stop_playing,), daemon=True).start()
     hint = "говори" if always else "начинай фразу со слова «Вега»"
-    print(f"Слушаю — {hint}. {STOP_HOTKEY} — замолчать, Ctrl+C — выход.\n")
+    print(f"Слушаю — {hint}. {desktop.STOP_HOTKEY} — замолчать, Ctrl+C — выход.\n")
 
     for audio in phrases(threshold):
         # без initial_prompt: на тишине Whisper начинает повторять текст подсказки
