@@ -84,8 +84,12 @@ elif sys.platform == "darwin":
     import subprocess
     from pathlib import Path
 
-    def _osascript(script: str) -> str:
-        return subprocess.run(["osascript", "-e", script], capture_output=True, text=True).stdout.strip()
+    def _osascript(script: str, quiet: bool = False) -> str:
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+        if result.returncode != 0 and not quiet:
+            # без «Универсального доступа» или «Автоматизации» osascript падает молча — показываем причину
+            print(f"  [osascript: {result.stderr.strip()}]")
+        return result.stdout.strip()
 
     def _frontmost_app() -> str:
         return _osascript('tell application "System Events" to get name of first application process '
@@ -127,11 +131,14 @@ elif sys.platform == "darwin":
             return ("tmux", pane)
         _countdown()
         app = _frontmost_app()
-        print(f"\rЦелевое приложение: «{app}»          ")
-        return ("app", app)
+        # Окно запоминаем отдельно: если слушатель и Claude Code открыты в одном приложении
+        # (оба в Terminal), activate вернёт фокус на окно слушателя. Работает для Terminal и iTerm.
+        window = _osascript(f'tell application "{app}" to id of front window', quiet=True)
+        print(f"\rЦелевое приложение: «{app}»" + (f", окно {window}" if window else "") + "          ")
+        return ("app", app, window)
 
-    def deliver(target: tuple[str, str], text: str) -> bool:
-        kind, name = target
+    def deliver(target: tuple, text: str) -> bool:
+        kind, name, *rest = target
         if kind == "tmux":
             if _tmux("send-keys", "-t", name, "-l", text).returncode != 0:
                 print(f"  [панель tmux {name} недоступна — не отправлено]")
@@ -139,13 +146,15 @@ elif sys.platform == "darwin":
             time.sleep(0.1)  # иначе Enter приходит вместе с текстом, как вставка, и не отправляет
             _tmux("send-keys", "-t", name, "Enter")
             return True
-        return _deliver_app(name, text)
+        return _deliver_app(name, rest[0], text)
 
-    def _deliver_app(app: str, text: str) -> bool:
+    def _deliver_app(app: str, window: str, text: str) -> bool:
         # Русский текст через keystroke печатается криво, поэтому вставка из буфера обмена.
         # Нужно разрешение: Настройки → Конфиденциальность → Универсальный доступ → терминал.
         previous = subprocess.run(["pbpaste"], capture_output=True).stdout
         subprocess.run(["pbcopy"], input=text.encode("utf-8"))
+        if window:
+            _osascript(f'tell application "{app}" to set index of window id {window} to 1')
         _osascript(f'tell application "{app}" to activate')
         time.sleep(0.2)
         if _frontmost_app() != app:
@@ -170,7 +179,19 @@ elif sys.platform == "darwin":
         except ImportError:
             print("[pynput не установлен — горячая клавиша отключена]")
             return
-        with keyboard.GlobalHotKeys({"<ctrl>+<cmd>+s": on_stop}) as listener:
+        # GlobalHotKeys сравнивает символы, а с Ctrl клавиша S даёт «\x13», в русской раскладке — «ы».
+        # Поэтому ловим физическую клавишу S по коду (kVK_ANSI_S = 1).
+        ctrl = {keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r}
+        cmd = {keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r}
+        held = set()
+
+        def on_press(key):
+            if key in ctrl or key in cmd:
+                held.add(key)
+            elif getattr(key, "vk", None) == 1 and held & ctrl and held & cmd:
+                on_stop()
+
+        with keyboard.Listener(on_press=on_press, on_release=held.discard) as listener:
             listener.join()
 
 else:
